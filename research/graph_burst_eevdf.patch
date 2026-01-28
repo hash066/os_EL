@@ -1,0 +1,89 @@
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -53,6 +53,13 @@ struct bore_ctx {
+ 	};
+ 	bool			stop_update;
+ 	bool			futex_waiting;
++#ifdef CONFIG_SCHED_GRAPH_BURST
++	/* Graph-Burst Additions for IEEE Access Research */
++	u64				burst_pred;      /* EWMA predicted burst */
++	u64				dep_weight;      /* MWIS local dependency weight */
++	u32				graph_boost;     /* Final computed multiplier */
++#endif
+ };
+ #endif /* CONFIG_SCHED_BORE */
+ 
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -21,6 +21,41 @@
+  *  Detailed explanation of BORE (Burst-Oriented Response Enhancer) logic
+  *  integrated with Graph-Burst EEVDF enhancements.
+  */
++
++#ifdef CONFIG_SCHED_GRAPH_BURST
++/* Compute Local Greedy MWIS weight for the cgroup node */
++static void update_graph_dep_weight(struct sched_entity *se)
++{
++	struct task_struct *p = entity_is_task(se) ? task_of(se) : NULL;
++	struct sched_entity *parent = se->parent;
++	u64 weight = se->load.weight;
++	u64 sibling_load = 0;
++
++	if (!p) return;
++
++	/* Local MWIS simulation: weight = my_load / (1 + sum_of_neighbor_loads)
++	 * In cgroups, neighbors are siblings in the same task group. */
++	if (parent && parent->my_q) {
++		sibling_load = parent->my_q->avg_load;
++	}
++
++	/* Simple MWIS approximation: higher priority * load in hierarchy */
++	p->bore.dep_weight = (weight << 10) / (1 + sibling_load);
++	
++	/* EWMA for burst prediction: pred = 0.75*pred + 0.25*current */
++	p->bore.burst_pred = (p->bore.burst_pred * 3 + p->bore.burst_time) >> 2;
++
++	/* Final Boost: vruntime benefit based on graph importance and burst history */
++	/* Formula: boost = dep_weight * (1 + burst_pred / system_avg) */
++	p->bore.graph_boost = (u32)(p->bore.dep_weight * (1 + (p->bore.burst_pred >> 20)));
++}
++
++/* Adjust EEVDF virtual deadline based on boost to reduce latency */
++static void apply_graph_burst_limit(struct sched_entity *se, u64 *vruntime)
++{
++	struct task_struct *p = entity_is_task(se) ? task_of(se) : NULL;
++	if (p && p->bore.graph_boost > 1024)
++		*vruntime -= (*vruntime * (p->bore.graph_boost - 1024)) >> 16;
++}
++#endif
+ 
+ /*
+  * EEVDF: Earliest Eligible Virtual Deadline First
+@@ -710,6 +745,10 @@ static void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
+ 	s64 lag, limit;
+ 
+ 	if (entity_is_task(se)) {
++#ifdef CONFIG_SCHED_GRAPH_BURST
++		update_graph_dep_weight(se);
++		apply_graph_burst_limit(se, &se->vruntime);
++#endif
+ 		/* ... existing code ... */
+ 	}
+ }
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1280,6 +1280,14 @@ config SCHED_BORE
+ 	  of interactive tasks under heavy load.
+ 	  If unsure, say Y.
+ 
++config SCHED_GRAPH_BURST
++	bool "Graph-Burst EEVDF Enhancement"
++	depends on SCHED_BORE
++	default n
++	help
++	  Enables topology-aware burst prediction using local greedy MWIS.
++	  Targeted for low-latency research and IEEE Access publication.
++
+ config SCHED_AUTOGROUP
+ 	bool "Automatic process group scheduling"
+ 	select CGROUPS

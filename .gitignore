@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.exe
+*.o
+tests/pseudocc
+research/linux-6.12/
+research/linux-6.12.tar.xz
+bore-dashboard/node_modules/
+bore-dashboard/dist/
+.env
+.local
